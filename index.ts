@@ -1,20 +1,24 @@
-import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import {
 	effectiveRunState,
 	inboxDir,
 	launchRun,
 	listRuns,
 	readMetadata,
+	readLatestAssistant,
 	removeRunDir,
+	reportProgramStatus,
 	runDisplayName,
 	type InboxMessage,
 	type RunMetadata,
-	tmuxSessionExists,
+	runIsRunning,
+	runProgramState,
+	stopRun,
+	focusRun,
 	updateMetadata,
 	waitForRunShutdown,
 } from "./shared.ts";
@@ -38,8 +42,12 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	}
 
 	pi.registerCommand("subagent", {
-		description: "Select and attach to a subagent spawned by this session",
+		description: "Switch to a subagent's Rex tab",
 		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("/subagent requires interactive mode", "error");
+				return;
+			}
 			const runs = listRuns(ctx.sessionManager.getSessionId()).filter((run) => effectiveRunState(run) !== "exited");
 			if (runs.length === 0) {
 				ctx.ui.notify("No active subagents spawned by this session", "info");
@@ -50,9 +58,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				value: run.handle,
 				label: `${runDisplayName(run)}  ${displayState(run)}  ${run.provider}/${run.model}  ${run.thinking}`,
 			}));
-			let tui: TUI | undefined;
 			const selected = await ctx.ui.custom<string | undefined>((customTui, theme, _keybindings, done) => {
-				tui = customTui;
 				const list = new SelectList(items, Math.min(items.length, 10), {
 					selectedPrefix: (text) => theme.fg("accent", text),
 					selectedText: (text) => theme.fg("accent", text),
@@ -65,13 +71,13 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 				const container = new Container();
 				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
-				container.addChild(new Text(theme.fg("accent", theme.bold("Attach to subagent")), 1, 0));
+				container.addChild(new Text(theme.fg("accent", theme.bold("Switch to subagent")), 1, 0));
 				container.addChild(list);
 				container.addChild(
 					new Text(
 						theme.fg(
 							"dim",
-							`${keyHint("tui.select.confirm", "attach")}  ${keyHint("tui.select.cancel", "cancel")}`,
+							`${keyHint("tui.select.confirm", "select")}  ${keyHint("tui.select.cancel", "cancel")}`,
 						),
 						1,
 						0,
@@ -88,31 +94,15 @@ export default function subagentExtension(pi: ExtensionAPI) {
 					},
 				};
 			});
-			if (!selected || !tui) return;
+			if (!selected) return;
 			const run = runs.find((candidate) => candidate.handle === selected);
 			if (!run) return;
 
-			if (process.env.TMUX) {
-				const exitCode = await new Promise<number | null>((resolveExit) => {
-					const child = spawn("tmux", ["switch-client", "-t", run.tmuxSession], { stdio: "inherit" });
-					child.on("error", () => resolveExit(null));
-					child.on("close", resolveExit);
-				});
-				if (exitCode !== 0) ctx.ui.notify(`Could not switch to ${run.handle}`, "error");
-				return;
-			}
-
-			tui.stop();
 			try {
-				const exitCode = await new Promise<number | null>((resolveExit) => {
-					const child = spawn("tmux", ["attach-session", "-t", run.tmuxSession], { stdio: "inherit" });
-					child.on("error", () => resolveExit(null));
-					child.on("close", resolveExit);
-				});
-				if (exitCode !== 0) process.stderr.write(`Could not attach to ${run.handle}\n`);
-			} finally {
-				tui.start();
-				tui.requestRender(true);
+				if (!process.env.REX_SESSION) throw new Error("Open the parent Pi in Rex to switch to this subagent");
+				focusRun(run, process.env.REX_SESSION);
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
 		},
 	});
@@ -120,36 +110,75 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	if (!runDir) {
 		let widgetTimer: ReturnType<typeof setInterval> | undefined;
 		let widgetContext: ExtensionContext | undefined;
+		const reportedStates = new Map<string, string>();
+		let refreshing = false;
 
-		const refreshWidget = (): void => {
-			if (!widgetContext) return;
-			const activeRuns = listRuns(widgetContext.sessionManager.getSessionId())
-				.map((run) => ({ run, state: effectiveRunState(run) }))
-				.filter(({ state }) => state !== "exited");
-			if (activeRuns.length === 0) {
-				widgetContext.ui.setWidget("subagents", undefined);
-				return;
-			}
+		const refreshWidget = async (): Promise<void> => {
+			if (!widgetContext || refreshing) return;
+			const context = widgetContext;
+			refreshing = true;
+			try {
+				const states = await Promise.all(listRuns(context.sessionManager.getSessionId()).map(async (run) => {
+					if (run.state === "error" || run.state === "exited") {
+						return { run, state: effectiveRunState(run) };
+					}
+					let state: ReturnType<typeof effectiveRunState> = "unavailable";
+					if (run.rexBlock) {
+						try {
+							const result = await pi.exec("rex", ["--autostart=false", "--timeout", "3s", "block", "call", "-s", run.rexSession, "-b", run.rexBlock, "process"], { timeout: 5000 });
+							if (result.code === 0) state = JSON.parse(result.stdout).child ? run.state : "exited";
+							else if (result.code === 3) state = "exited";
+						} catch {
+							// Keep unavailable distinct from a confirmed exit.
+						}
+					}
+					return { run, state };
+				}));
+				if (widgetContext !== context) return;
+				const activeRuns = states.filter(({ state }) => state !== "exited");
+				for (const { run, state } of activeRuns) {
+					if (state === "unavailable" || reportedStates.get(run.handle) === `${run.name}:${state}:${run.outcome}`) continue;
+					reportProgramStatus(
+						runProgramState(run),
+						run.name ?? run.handle, `subagent/${run.handle}`,
+					);
+					reportedStates.set(run.handle, `${run.name}:${state}:${run.outcome}`);
+				}
+				for (const handle of reportedStates.keys()) {
+					if (activeRuns.some(({ run }) => run.handle === handle)) continue;
+					reportProgramStatus("clear", "", `subagent/${handle}`);
+					reportedStates.delete(handle);
+				}
+				if (activeRuns.length === 0) {
+					widgetContext.ui.setWidget("subagents", undefined);
+					return;
+				}
 
-			const visible = activeRuns.slice(0, 5).map(({ run, state }) => {
-				const color =
-					state === "busy" ? "warning" : state === "idle" ? "success" : state === "error" ? "error" : "muted";
-				return widgetContext!.ui.theme.fg(color, `${run.name ?? run.handle}:${state}`);
-			});
-			if (activeRuns.length > visible.length) {
-				visible.push(widgetContext.ui.theme.fg("muted", `+${activeRuns.length - visible.length}`));
+				const visible = activeRuns.slice(0, 5).map(({ run, state }) => {
+					const color =
+						state === "busy" || state === "blocked" ? "warning" : state === "idle" ? "success" : state === "error" ? "error" : "muted";
+					return widgetContext!.ui.theme.fg(color, `${run.name ?? run.handle}:${state}`);
+				});
+				if (activeRuns.length > visible.length) {
+					visible.push(widgetContext.ui.theme.fg("muted", `+${activeRuns.length - visible.length}`));
+				}
+				widgetContext.ui.setWidget(
+					"subagents",
+					[widgetContext.ui.theme.fg("dim", "subagents: ") + visible.join(widgetContext.ui.theme.fg("dim", " | "))],
+					{ placement: "belowEditor" },
+				);
+			} finally {
+				refreshing = false;
 			}
-			widgetContext.ui.setWidget(
-				"subagents",
-				[widgetContext.ui.theme.fg("dim", "subagents: ") + visible.join(widgetContext.ui.theme.fg("dim", " | "))],
-				{ placement: "belowEditor" },
-			);
 		};
 
 		pi.on("session_start", (_event, ctx) => {
 			// Relaunch children that were suspended when this session was last quit or switched away from.
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
-				if (!run.suspended || tmuxSessionExists(run.tmuxSession)) continue;
+				if (!run.suspended) continue;
+				const running = runIsRunning(run);
+				if (running === true) updateMetadata(run.runDir, { suspended: undefined });
+				if (running !== false) continue;
 				if (!existsSync(run.sessionFile)) {
 					removeRunDir(run.runDir);
 					continue;
@@ -166,8 +195,8 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 			if (!ctx.hasUI) return;
 			widgetContext = ctx;
-			refreshWidget();
-			widgetTimer = setInterval(refreshWidget, 1000);
+			void refreshWidget();
+			widgetTimer = setInterval(() => void refreshWidget(), 1000);
 			widgetTimer.unref();
 		});
 
@@ -176,17 +205,29 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			widgetTimer = undefined;
 			widgetContext = undefined;
 			ctx.ui.setWidget("subagents", undefined);
+			for (const handle of reportedStates.keys()) reportProgramStatus("clear", "", `subagent/${handle}`);
+			reportedStates.clear();
 			if (event.reason === "reload") return;
 			// Suspend running children: stop the process but keep transcript and metadata so resuming this
 			// session relaunches them. Children that already exited on their own are discarded.
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
-				if (!tmuxSessionExists(run.tmuxSession)) {
-					if (!run.suspended) removeRunDir(run.runDir);
-					continue;
+				try {
+					const running = runIsRunning(run);
+					if (running === undefined) {
+						updateMetadata(run.runDir, { suspended: true });
+						throw new Error("Terminal backend unavailable; child data was preserved");
+					}
+					if (!running) {
+						stopRun(run);
+						if (!run.suspended) removeRunDir(run.runDir);
+						continue;
+					}
+					updateMetadata(run.runDir, { suspended: true });
+					stopRun(run);
+					await waitForRunShutdown(run.runDir);
+				} catch (error) {
+					if (ctx.hasUI) ctx.ui.notify("Could not suspend " + runDisplayName(run) + ": " + error, "error");
 				}
-				updateMetadata(run.runDir, { suspended: true });
-				spawnSync("tmux", ["kill-session", "-t", run.tmuxSession], { stdio: "ignore" });
-				await waitForRunShutdown(run.runDir);
 			}
 		});
 		return;
@@ -196,11 +237,21 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | undefined;
 	let processing = false;
 	let sessionName: string | undefined;
+	let terminalStatus: string | undefined;
+	let promptKind: "permission" | "question" | undefined;
 
 	const syncSessionName = (): void => {
 		const metadata = readMetadata(runDir);
 		if (!metadata) return;
 		const next = `subagent ${metadata.name ?? metadata.handle}`;
+		const status = `${metadata.state}:${metadata.outcome}:${next}:${promptKind}`;
+		if (status !== terminalStatus) {
+			reportProgramStatus(
+				runProgramState(metadata),
+				next, undefined, metadata.state === "blocked" ? promptKind : undefined,
+			);
+			terminalStatus = status;
+		}
 		if (next === sessionName) return;
 		pi.setSessionName(next);
 		sessionName = next;
@@ -231,7 +282,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 					continue;
 				}
 
-				updateMetadata(runDir, { state: "busy", error: undefined });
+				updateMetadata(runDir, { state: promptKind ? "blocked" : "busy", error: undefined });
 				try {
 					if (currentContext.isIdle()) {
 						pi.sendUserMessage(payload.message);
@@ -275,12 +326,29 @@ export default function subagentExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_start", (_event, ctx) => {
 		currentContext = ctx;
-		updateMetadata(runDir, { state: "busy", hasStarted: true, error: undefined });
+		updateMetadata(runDir, { state: "busy", hasStarted: true, outcome: undefined, error: undefined });
+		syncSessionName();
 	});
 
-	pi.on("agent_settled", (_event, ctx) => {
+	pi.on("agent_settled", (event, ctx) => {
 		currentContext = ctx;
-		if (ctx.isIdle()) updateMetadata(runDir, { state: "idle" });
+		if (ctx.isIdle()) {
+			const latest = readLatestAssistant(readMetadata(runDir)?.sessionFile ?? "");
+			updateMetadata(runDir, { state: "idle", outcome: event.aborted ? "aborted" : latest?.stopReason === "error" ? "error" : "completed" });
+		}
+		syncSessionName();
+	});
+
+	pi.on("ui_prompt_start", (event) => {
+		promptKind = event.kind === "confirm" ? "permission" : "question";
+		updateMetadata(runDir, { state: "blocked" });
+		syncSessionName();
+	});
+
+	pi.on("ui_prompt_end", (_event, ctx) => {
+		promptKind = undefined;
+		updateMetadata(runDir, { state: ctx.isIdle() ? "idle" : "busy" });
+		syncSessionName();
 	});
 
 	pi.on("session_shutdown", (event) => {
@@ -289,6 +357,9 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			clearInterval(timer);
 			timer = undefined;
 		}
-		if (event.reason === "quit") updateMetadata(runDir, { state: "exited" });
+		if (event.reason === "quit") {
+			updateMetadata(runDir, { state: "exited" });
+			reportProgramStatus("clear", "");
+		}
 	});
 }
