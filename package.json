@@ -4,9 +4,6 @@
   "private": true,
   "keywords": ["pi-package"],
   "type": "module",
-  "scripts": {
-    "test": "node --test --test-concurrency=1 tests/*.test.ts"
-  },
   "bin": {
     "subagent": "./subagent.ts"
   },

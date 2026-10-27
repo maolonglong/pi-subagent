@@ -2,15 +2,13 @@
 
 Observable, persistent Pi subagents for independent reviews, investigations, and delegated implementation.
 
-Each subagent runs in its own Rex tab with a dedicated Pi JSONL session. The tab appears when the child starts, while the parent keeps focus. Select the tab or use `/subagent` to switch to the child. The parent can inspect status, wait for durable results, steer active work, or queue follow-ups.
+Each subagent runs in its own tmux session with a dedicated Pi JSONL session. The parent can inspect status, wait for durable results, steer active work, queue follow-ups, or attach directly to the child TUI.
 
 ## Requirements
 
 - Pi
 - Node.js 22.19 or newer
-- Rex with the window API
-
-Run Pi inside a Rex terminal. Spawning requires `REX_SESSION` and `REX_BLOCK`.
+- tmux
 
 ## Install
 
@@ -24,8 +22,6 @@ ln -s ../extensions/subagent/subagent.ts ~/.pi/agent/bin/subagent
 Run `/reload` in an existing Pi session. The extension contributes its bundled skill automatically.
 
 ## Usage
-
-Use `subagent --help` (or `-h`) to show usage. Each subcommand also accepts these flags, for example `subagent spawn --help`. Help works without Rex or model configuration.
 
 Spawn with a descriptive name using the parent session's provider, model, and thinking level:
 
@@ -72,9 +68,7 @@ subagent stop a1b2c3
 subagent list
 ```
 
-Use `/subagent` to select an active child and switch to its Rex tab. Select the parent's tab to return. Selecting the child again focuses the same tab and process. A completed child keeps its tab until stopped; `subagent stop` closes the terminal and removes its transcript and metadata.
-
-The parent widget shows names and states, including `blocked` when a child is waiting on an extension dialog and `unavailable` when its terminal backend cannot be reached. Rex also receives native working, blocked, done, and error status updates; cancelled work reports idle. Child statuses are mirrored into the parent's terminal so Rex can show progress while the parent tab is active. Results still come from Pi's JSONL session, not terminal captures.
+Use `/subagent` to select and attach to an active child. The status widget shows active names (or handles for unnamed runs) and their current state.
 
 ## Isolation
 
@@ -86,18 +80,4 @@ Optional spawn flags:
 - `--no-prompt-templates`: disable prompt templates
 - `--no-context-files`: ignore repository instruction files
 
-Nested subagents are disabled. Child sessions do not receive the subagent skill. Children survive `/reload`. When their spawning Pi session quits or is replaced, running children are suspended: the process stops, but transcript and metadata are kept. Resuming that parent session relaunches them idle with their full history in visible Rex tabs, while keeping the current tab active. `subagent stop` removes a run permanently.
-
-Rex runs on the same host as Pi and the run files. Its launcher receives the parent's `PATH` and `PI_CODING_AGENT_DIR`; other variables come from the Rex server environment. Backend connection failures preserve run data. If creation times out before a block ID is returned, inspect Rex before retrying: the terminal may already exist. `subagent stop <handle>` looks up a missing block ID by the stable block label, closes the matching terminal, or removes the failed record when Rex confirms no match. It preserves the record if Rex is unreachable or multiple blocks match.
-
-## Upgrading from the tmux version
-
-This fork uses Rex only and does not read or migrate tmux run records. Before upgrading, use the tmux version's `subagent list` and stop the runs you no longer need. Stopping deletes each run's transcript and metadata, so copy any history you want to keep first. Existing tmux sessions must be managed with the old plugin or tmux; the Rex version cannot stop them.
-
-## Development checks
-
-```sh
-npm test
-```
-
-The suite checks Rex failure handling and rejects spawning outside Rex. When run inside Rex, it also exercises visible child tabs and real Pi sessions, including tab focus through `/subagent`, `/reload`, permission dialogs, and parent shutdown/resume. Model responses come from a deterministic test provider with no network requests. Integration checks skip when `REX_SESSION` is unset. Each integration test prints the temporary directory containing its fixtures, transcripts, and result report.
+Nested subagents are disabled. Child sessions do not receive the subagent skill. Children survive `/reload`. When their spawning Pi session quits or is replaced, running children are suspended: the process stops, but transcript and metadata are kept. Resuming that parent session relaunches them idle with their full history. `subagent stop` removes a run permanently.

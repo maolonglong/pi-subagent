@@ -2,6 +2,7 @@
 
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -18,22 +19,21 @@ import {
 	isValidRunName,
 	type InboxMessage,
 	type RunMetadata,
-	runIsRunning,
-	stopRun,
+	tmuxSessionExists,
 	updateMetadata,
 	waitForRunShutdown,
 	writeMetadata,
 } from "./shared.ts";
 
 const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const viewHint = "View: select the Rex tab or use /subagent to switch to it";
 const extensionPath = join(dirname(fileURLToPath(import.meta.url)), "index.ts");
 
 function fail(message: string): never {
 	throw new Error(message);
 }
 
-const HELP = `Usage:
+function usage(): never {
+	fail(`Usage:
   subagent spawn [--name <name>] [--provider <provider>] [--model <model>] [--thinking <level>]
     [--cwd <dir>] [--tools <names>] [--no-extensions] [--no-skills]
     [--no-prompt-templates] [--no-context-files] (--prompt <text> | --file <path>)...
@@ -42,11 +42,7 @@ const HELP = `Usage:
   subagent send <handle> [--follow-up] <message>
   subagent wait <handle> [--timeout <seconds>]
   subagent stop <handle>
-  subagent list
-  subagent [<command>] --help | -h`;
-
-function usage(): never {
-	fail(HELP);
+  subagent list`);
 }
 
 function valueAfter(args: string[], index: number, option: string): string {
@@ -83,8 +79,6 @@ function generateHandle(): string {
 
 function spawnSubagent(args: string[]): void {
 	if (process.env.PI_SUBAGENT_RUN_DIR) fail("Nested subagents are disabled");
-	const rexSession = process.env.REX_SESSION;
-	if (!rexSession || !process.env.REX_BLOCK) fail("Run subagent spawn inside a Rex terminal (REX_SESSION and REX_BLOCK are required)");
 	let name: string | undefined;
 	let provider = process.env.PI_PROVIDER;
 	let model = process.env.PI_MODEL;
@@ -164,6 +158,7 @@ function spawnSubagent(args: string[]): void {
 	const handle = generateHandle();
 	const runDir = runDirForHandle(handle);
 	const sessionFile = join(runDir, "session.jsonl");
+	const tmuxSession = `pi-subagent-${handle}`;
 	mkdirSync(inboxDir(runDir), { recursive: true, mode: 0o700 });
 	writeFileSync(sessionFile, "", { mode: 0o600 });
 
@@ -181,7 +176,7 @@ function spawnSubagent(args: string[]): void {
 		name,
 		parentSessionId: process.env.PI_SESSION_ID || undefined,
 		parentSessionFile: process.env.PI_SESSION_FILE || undefined,
-		rexSession,
+		tmuxSession,
 		runDir,
 		sessionFile,
 		cwd,
@@ -201,19 +196,18 @@ function spawnSubagent(args: string[]): void {
 	try {
 		launchRun(metadata, initialArgs);
 	} catch (error) {
-		// A timed-out Rex creation may have succeeded; preserve its files for recovery.
-		updateMetadata(runDir, { state: "error", error: String(error) });
+		removeRunDir(runDir);
 		throw error;
 	}
 
-	process.stdout.write(`Spawned ${runDisplayName(metadata)}\nState: starting\n${viewHint}\n`);
+	process.stdout.write(`Spawned ${runDisplayName(metadata)}\nState: busy\nAttach: tmux attach -t ${tmuxSession}\n`);
 }
 
 function statusSubagent(args: string[]): void {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
 	process.stdout.write(
-		`${runDisplayName(metadata)}: ${effectiveRunState(metadata)} (${metadata.provider}/${metadata.model}, ${metadata.thinking})\n${viewHint}\n`,
+		`${runDisplayName(metadata)}: ${effectiveRunState(metadata)} (${metadata.provider}/${metadata.model}, ${metadata.thinking})\nAttach: tmux attach -t ${metadata.tmuxSession}\n`,
 	);
 }
 
@@ -239,9 +233,7 @@ function sendSubagent(args: string[]): void {
 	const message = messageParts.join(" ").trim();
 	if (!message) fail("send requires a message");
 	const metadata = getRun(handle);
-	const running = runIsRunning(metadata);
-	if (running === undefined) fail(`Cannot reach terminal backend for ${handle}`);
-	if (!running) fail(`${handle} is not running`);
+	if (!tmuxSessionExists(metadata.tmuxSession)) fail(`${handle} is not running`);
 
 	const queueDir = inboxDir(metadata.runDir);
 	mkdirSync(queueDir, { recursive: true, mode: 0o700 });
@@ -277,7 +269,6 @@ async function waitSubagent(args: string[]): Promise<void> {
 			? readdirSync(inboxDir(metadata.runDir)).some((file) => file.endsWith(".json"))
 			: false;
 		const state = effectiveRunState(metadata);
-		if (state === "unavailable") fail(`Cannot reach terminal backend for ${handle}; run data was preserved`);
 		if (state === "error") fail(metadata.error || `${handle} failed`);
 		if (state === "exited") fail(`${handle} exited before finishing`);
 		if (metadata.hasStarted && state === "idle" && !pending) {
@@ -295,7 +286,8 @@ async function waitSubagent(args: string[]): Promise<void> {
 async function stopSubagent(args: string[]): Promise<void> {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
-	const wasRunning = stopRun(metadata);
+	const wasRunning = tmuxSessionExists(metadata.tmuxSession);
+	spawnSync("tmux", ["kill-session", "-t", metadata.tmuxSession], { stdio: "ignore" });
 	if (wasRunning) await waitForRunShutdown(metadata.runDir);
 	removeRunDir(metadata.runDir);
 	process.stdout.write(`Stopped ${runDisplayName(metadata)}\n`);
@@ -318,14 +310,6 @@ function listSubagents(args: string[]): void {
 async function main(): Promise<void> {
 	const args = process.argv.slice(2);
 	const command = args.shift();
-	if (
-		command === "--help" || command === "-h" ||
-		(["spawn", "status", "rename", "send", "wait", "stop", "list"].includes(command ?? "") &&
-			args.length === 1 && (args[0] === "--help" || args[0] === "-h"))
-	) {
-		process.stdout.write(`${HELP}\n`);
-		return;
-	}
 	switch (command) {
 		case "spawn":
 			spawnSubagent(args);
