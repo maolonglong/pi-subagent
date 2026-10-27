@@ -2,13 +2,18 @@
 
 Observable, persistent Pi subagents for independent reviews, investigations, and delegated implementation.
 
-Each subagent runs in its own tmux session with a dedicated Pi JSONL session. The parent can inspect status, wait for durable results, steer active work, queue follow-ups, or attach directly to the child TUI.
+Each subagent runs in its own Herdr tab with a dedicated Pi JSONL session. Creating a child keeps the current tab focused. The parent can inspect status, read durable results, steer active work, queue follow-ups, or use `/subagent` to switch to the child's existing tab.
 
 ## Requirements
 
-- Pi
+- Pi 1.4.0 or newer
 - Node.js 22.19 or newer
-- tmux
+- Herdr 0.9.5 or newer, on the same host as Pi, with a POSIX shell (tested with zsh)
+- Herdr's Pi integration, installed with `herdr integration install pi`
+
+Run Pi inside Herdr. The CLI requires `HERDR_ENV=1` and the socket, workspace, and pane context supplied by Herdr. The plugin finds the official integration in the configured Pi agent directory or `~/.pi/agent/extensions/herdr-agent-state.ts`. It explicitly loads the control bridge and official integration in children, including children using `--no-extensions`. The managed integration file is not modified.
+
+The integration must support the `herdr:blocked` event (validated with integration v9).
 
 ## Install
 
@@ -29,7 +34,7 @@ Spawn with a descriptive name using the parent session's provider, model, and th
 subagent spawn --name review --prompt "Review the current diff independently"
 ```
 
-Names appear in the parent UI. Generated handles remain the stable identifiers used by management commands.
+Names appear in the parent UI and tab label, together with generated handles. Handles remain the stable identifiers used by management commands.
 
 Override the model configuration when needed:
 
@@ -68,7 +73,9 @@ subagent stop a1b2c3
 subagent list
 ```
 
-Use `/subagent` to select and attach to an active child. The status widget shows active names (or handles for unnamed runs) and their current state.
+Use `/subagent` to select an active child and focus its Herdr tab. Repeated selection reuses the same tab and process. If the child pane is moved to another tab, management follows its terminal identity.
+
+The parent widget shows `starting`, `busy`, `blocked`, `idle`, `error`, or `unavailable`. Extension dialogs report `blocked` through the official Herdr integration. Errors and cancelled results are determined from Pi state and JSONL, rather than terminal captures; `wait` returns a nonzero exit code for them.
 
 ## Isolation
 
@@ -80,4 +87,34 @@ Optional spawn flags:
 - `--no-prompt-templates`: disable prompt templates
 - `--no-context-files`: ignore repository instruction files
 
-Nested subagents are disabled. Child sessions do not receive the subagent skill. Children survive `/reload`. When their spawning Pi session quits or is replaced, running children are suspended: the process stops, but transcript and metadata are kept. Resuming that parent session relaunches them idle with their full history. `subagent stop` removes a run permanently.
+Nested subagents are disabled. Child sessions do not receive the subagent skill. Children survive `/reload`. When their spawning Pi session quits or is replaced, running children are suspended: their panes close, but their transcripts and metadata remain. Resuming that parent session creates new child tabs, loads their histories, and leaves them idle without replaying the initial task. A surviving child after an abrupt parent exit is rediscovered instead of duplicated.
+
+Suspending interrupts current generation. Only durable history is preserved; in-flight generation and messages already accepted into Pi's in-memory queues are not guaranteed to survive.
+
+`subagent stop` permanently removes a run and its transcript after confirming closure. It closes only the identified child pane, preserving any other panes added to its tab. It refuses to close another Pi session or an unrelated foreground process reusing the terminal.
+
+## Storage and failures
+
+Run data is stored under the Pi agent directory's `subagents/` folder:
+
+- `metadata.json`: CLI-owned configuration, name, and parent-session association.
+- `terminal.json`: parent-owned Herdr endpoint, terminal identity, launch phase, and suspension marker.
+- `state.json`: child-owned PID, session path, status, and outcome.
+- `lifecycle-*.lock`: PID-tagged tickets that serialize parent/CLI lifecycle operations.
+- `session.jsonl` and `inbox/`: Pi history and message delivery.
+
+Separate writers prevent a stale child status write from overwriting a rename, terminal identity, or suspension marker. Lifecycle operations use ordered, per-controller tickets and reread metadata after acquiring ownership, so concurrent restores cannot create duplicate children. Suspension intent is saved before closing a live child; if the close response is lost, resume verifies the original terminal is absent before creating another one. Updates use atomic file replacement. Initial multiline task text is stored in a private file and passed through Pi's native `@file` processing; fixed launcher arguments are shell-quoted. Startup uses `pane run`, then verifies the matching Pi session, so long tasks do not cause an idle-readiness timeout.
+
+A backend failure is `unavailable`, not proof of exit. Endpoint mismatches, uncertain creation replies, and occupied terminals preserve run data. If creation times out, inspect Herdr before retrying: a tab may already exist. Without a confirmed terminal identity, `stop` preserves the record rather than closing a guessed tab. No automatic creation retry or force-cleanup option is provided.
+
+Lifecycle tickets are removed on completion or a caught failure. After an interrupted operation, the next controller reclaims only tickets whose PID is confirmed dead. A live owner is never displaced. Invalid owner records are preserved for inspection instead of being guessed away.
+
+## Development checks
+
+```sh
+npm test
+```
+
+The suite includes CLI boundary and ownership failure tests, storage regressions, and real Herdr/Pi tests using a deterministic local provider. Real tests create disposable tabs, exercise startup, `/subagent`, reload, suspension/resume, message delivery, dialogs, and terminal reuse, then clean up only their own tabs and restore focus. They skip when `HERDR_ENV` is not `1`. Each test prints an evidence directory containing reports, command results, and fixtures needed to inspect the run.
+
+The supported baseline is local Herdr. SSH, multi-server operation, server restart recovery, and sustained concurrency stress are not covered by these checks.

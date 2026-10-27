@@ -1,93 +1,85 @@
 ---
 name: subagent
-description: Spawn and communicate with observable Pi subagents for second opinions, independent investigations, and delegated implementation work.
+description: Delegate bounded reviews, investigations, or implementation to separate Pi sessions in Herdr; collect results, steer work, and manage follow-ups.
 ---
 
 # Subagent
 
-Use the `subagent` CLI to delegate work to a separate Pi process with its own context and tmux session. Managed subagents cannot spawn nested subagents, and this skill is not loaded into their sessions.
+Use the `subagent` CLI inside a Herdr-managed pane. Each child has its own context and tab; it does not inherit the parent conversation. Managed children cannot spawn nested subagents and do not receive this skill.
 
-## Spawn
+## Delegate
 
-Give each child a short, descriptive name. The name appears in the parent UI, while the generated handle remains its stable identifier:
+Give the child a bounded task: goal, relevant paths or files, constraints, expected output, and completion criteria. Keep work that requires shared parent-session context in the parent.
 
 ```sh
-subagent spawn --name implementation --prompt "Complete task"
+subagent spawn --name review --prompt "Review shared.ts for data-loss bugs. Read its callers and tests. Report concrete triggers and file:line evidence; leave files unchanged."
 ```
 
-By default, the child inherits the current Pi provider, model, and reasoning level from the bash environment. Use `--provider`, `--model`, or `--thinking` only when deliberately choosing a different configuration, for example a faster model for simple investigation or a stronger model for difficult review. Never pass `$PI_PROVIDER`, `$PI_MODEL`, or `$PI_REASONING_LEVEL` back to the CLI explicitly.
+The child inherits the current provider, model, and thinking level from the bash environment. Omit `--provider`, `--model`, and `--thinking` unless deliberately selecting another configuration; pass chosen values rather than echoing `$PI_PROVIDER`, `$PI_MODEL`, or `$PI_REASONING_LEVEL`.
 
-`--cwd` defaults to the current directory. Repeat `--prompt` and `--file` as needed; Pi receives all of them in the first user turn. Run `subagent spawn` directly without piping or redirecting its concise output.
+`--cwd` defaults to the current directory. Repeat `--prompt` and `--file` to supply material for the first user turn. Run spawn directly and retain its generated handle. The name is a display label; management commands use the handle. Creation opens a new tab without changing focus.
 
-## Tools
-
-Without `--tools`, Pi enables its four default tools:
-
-- `read` - Read text files and images.
-- `bash` - Execute shell commands. This can also modify files, so it is not a read-only capability.
-- `edit` - Apply exact text replacements to existing files.
-- `write` - Create or overwrite files.
-
-Three additional built-in tools are available but off by default:
-
-- `grep` - Search file contents.
-- `find` - Find files by glob pattern.
-- `ls` - List directory contents.
-
-`--tools` is a comma-separated allowlist across built-in, extension, and custom tools. Common choices:
+## Observe and collect
 
 ```sh
-# Enforced read-only repository investigation
---tools read,grep,find,ls
-
-# Investigation that may run tests or other commands; bash can modify files
---tools read,bash,grep,find,ls
-
-# Implementation work: omit --tools to use the defaults
-```
-
-## Isolation flags
-
-- `--no-extensions` - Disable normal extension discovery. Use for an independent run that should not inherit unrelated extension behavior or extension-provided tools. The subagent control bridge is still explicitly loaded.
-- `--no-skills` - Hide installed skills from the child. Use for tightly specified tasks that should rely only on the supplied prompt and files.
-- `--no-prompt-templates` - Disable prompt-template commands. Usually unnecessary, but useful when testing a minimal child environment.
-- `--no-context-files` - Ignore repository instruction files such as `AGENTS.md` and `CLAUDE.md`. Use only when those instructions would bias an independent investigation. Do not use for implementation unless intentionally bypassing repository guidance.
-
-Spawn prints a random handle and the exact tmux attach command. Keep the handle for later commands. Subagents persist after their current turn completes: `wait`, completion, and becoming idle do not terminate them. They survive `/reload`. When the spawning Pi session quits or is replaced, they are suspended and relaunched idle with their history when that session is resumed. They are only removed by `subagent stop`.
-
-## Inspect and wait
-
-```sh
-subagent status <handle>
 subagent list
-subagent wait <handle>
+subagent status <handle>
+subagent wait <handle> --timeout 45
 ```
 
-Run `subagent list` at any time to rediscover active subagents and their handles, names, and current states if you no longer remember them.
+Use `list` to rediscover handles. Set the bash tool timeout longer than the CLI wait timeout. A bounded wait lets you check progress and report updates; timeout ends only that wait, not the child.
 
-`wait` follows the durable session state and prints the latest final assistant response. Run it directly so the bash tool returns that response; do not redirect it to a file or pipe it unless the user explicitly asks for an artifact. Do not infer completion from captured terminal text. Set the bash timeout above `wait`'s default 1800-second deadline.
+`wait` reads durable Pi session state and prints the latest final assistant response. Run it directly so the result returns to the parent; redirect only when the user requests an artifact. Collect a result before sending another task when you need to report both replies. Terminal captures and Herdr's completion badge alone do not establish task success.
 
-## Communicate
-
-```sh
-# Change the name shown in the parent UI.
-subagent rename <handle> "new name"
-
-# Idle: starts a new prompt. Busy: steers the current work.
-subagent send <handle> "message"
-
-# Busy: waits until current work finishes, then starts another turn.
-subagent send <handle> --follow-up "message"
-```
-
-Names are 1–64 characters and need not be unique. Messages use the subagent extension's control inbox; do not use `tmux send-keys`.
-
-## Stop
+## Continue or finish
 
 ```sh
+# Idle: start another task. Busy: steer current work.
+subagent send <handle> "Focus on error handling"
+
+# Busy: run another turn after the current work finishes.
+subagent send <handle> --follow-up "Then summarize the remaining risks"
+
+subagent rename <handle> "error handling review"
 subagent stop <handle>
 ```
 
-Explicitly stop every subagent when it is no longer needed; do not leave completed subagents running idle. This terminates tmux and removes the run transcript and metadata. Keep an idle subagent alive only when concrete follow-up work is expected, then stop it afterward.
+Use `send` for delegated messages. Keep a completed child only for concrete follow-up work; otherwise stop it. Completion and `wait` leave the child alive. Before stopping, retain any result or history you need: `stop` closes the identified child pane and deletes that run's transcript and metadata after confirmed closure. Other panes in the tab are preserved.
 
-The interactive `/subagent` command lists active subagents spawned by the current Pi session. Selecting one suspends the current Pi TUI and attaches to its tmux session; detaching returns to the parent Pi. When the parent already runs inside tmux, selection switches the current tmux client instead.
+Use `/subagent` to select a child and focus its existing tab; select the parent's tab to return. Selection follows a child moved to another tab.
+
+Parent `/reload` preserves children. Parent quit or session replacement interrupts running children; resuming the parent restores their durable history idle, without replaying the initial task. In-flight generation and in-memory messages are not guaranteed to survive interruption.
+
+## Tools and isolation
+
+For implementation, omit `--tools` to retain the configured tools. Defaults vary with Pi, extensions, and MCP configuration; a tool allowlist alone does not isolate extension behavior.
+
+For an independent repository review, disable normal extension and skill discovery and request read-only built-in tools:
+
+```sh
+subagent spawn --name review --no-extensions --no-skills --tools read,grep,find,ls --prompt "Review shared.ts and its callers; report concrete findings without changing files."
+```
+
+Choose isolation flags for the task:
+
+- `--no-extensions`: disable normal extension discovery; managed control and Herdr status bridges remain loaded.
+- `--no-skills`: hide installed skills for a task fully specified by its prompt and files.
+- `--no-prompt-templates`: disable prompt-template commands.
+- `--no-context-files`: ignore repository instructions such as `AGENTS.md` and `CLAUDE.md`. Use only when those instructions would bias an independent investigation; retain them for implementation.
+
+If tests or shell commands are required, include `bash` in `--tools` or keep the configured defaults. Bash can modify files; describing a task as read-only is not a tool restriction.
+
+## Handle incomplete or failed runs
+
+Read the CLI error and current status before choosing the next action. A nonzero `wait` exit can mean task failure, cancellation, timeout, or an unavailable backend.
+
+| Condition | Action |
+| --- | --- |
+| Wait timed out; child is starting or busy | Continue waiting or send a useful steer. Reuse the same handle. |
+| `blocked` | Open the child with `/subagent` for user input. Messages do not answer the dialog. |
+| Spawn failed or timed out | Inspect `subagent list` and existing Herdr tabs before retrying; creation may already have succeeded. |
+| `unavailable` or terminal identity/reuse error | Preserve run data. Restore the connection or verify ownership before management; uncertainty is not proof of exit. |
+| Task error or cancellation | Report the failure; keep the child only for concrete recovery work, otherwise retain the needed result and stop it. |
+| Lifecycle operation already in progress | Let its owner finish, then retry. Confirmed dead-owner tickets are reclaimed automatically; invalid owner records require inspection. |
+
+For setup, compatibility, and storage details, read [README.md](../../README.md).
