@@ -98,6 +98,7 @@ test("real Herdr/Pi: long startup, selector, queue, reload, quit and resume", { 
  assert.ok(Date.now() - started < 15000, "startup waited for task completion");
  await until(() => h.run(handle).state === "busy", "long task did not start");
  let run = h.run(handle), child = await h.pane(run);
+ assert.ok(run.sessionFile.startsWith(join(h.dir, "sessions") + "/"));
  assert.equal((await h.tabs()).find((tab) => tab.focused).tab_id, h.original);
  assert.notEqual(child.tab_id, parent.tab);
  assert.equal((await h.tabs()).find((tab) => tab.tab_id === child.tab_id).pane_count, 1);
@@ -110,6 +111,10 @@ test("real Herdr/Pi: long startup, selector, queue, reload, quit and resume", { 
  assert.equal((await h.cli(["wait", handle, "--timeout", "5"], false)).code, 1);
  await h.cli(["send", handle, "hello after cancel"]);
  assert.match((await h.cli(["wait", handle, "--timeout", "10"])).stdout, /hello after cancel/);
+ const listingFrom = h.events().length;
+ await h.api(["agent", "prompt", child.pane_id, "/fixture-list-sessions"]);
+ await until(() => h.events().slice(listingFrom).some((event) => event.event === "session_listing" && event.paths.includes(run.sessionFile)), "native Pi session list did not discover the child");
+ h.check("native Pi session discovery includes the managed child");
  await h.cli(["rename", handle, "renamed child"]);
  assert.equal(h.run(handle).name, "renamed child");
  assert.match((await h.tabs()).find((tab) => tab.tab_id === child.tab_id).label, /renamed child/);
@@ -193,7 +198,7 @@ test("real Herdr terminal ownership survives moves, splits and reuse", { skip: !
  const h = await harness(t);
  const first = await h.spawn("split child", "hello");
  await h.cli(["wait", first, "--timeout", "10"]);
- const firstPane = await h.pane(h.run(first));
+ const firstRun = h.run(first), firstPane = await h.pane(firstRun);
  const extra = (await h.api(["pane", "split", firstPane.pane_id, "--direction", "right", "--cwd", root, "--focus"])).pane;
  assert.equal((await h.api(["pane", "list"])).panes.find((pane) => pane.focused).pane_id, extra.pane_id);
  await h.api(["tab", "focus", h.original]);
@@ -202,6 +207,7 @@ test("real Herdr terminal ownership survives moves, splits and reuse", { skip: !
  h.check("switching to a split tab focuses the child pane rather than the previous pane");
  await h.api(["tab", "focus", h.original]);
  await h.cli(["stop", first]);
+ assert.ok(existsSync(firstRun.sessionFile));
  assert.equal((await h.api(["pane", "get", extra.pane_id])).pane.tab_id, firstPane.tab_id);
  h.check("stop preserves a second pane added to a child tab");
  const handle = await h.spawn("reuse child", "hello");

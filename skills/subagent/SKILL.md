@@ -44,7 +44,7 @@ subagent rename <handle> "error handling review"
 subagent stop <handle>
 ```
 
-Use `send` for delegated messages. Keep a completed child only for concrete follow-up work; otherwise stop it. Completion and `wait` leave the child alive. Before stopping, retain any result or history you need: `stop` closes the identified child pane and deletes that run's transcript and metadata after confirmed closure. Other panes in the tab are preserved.
+Use `send` for delegated messages. Keep a completed child only for concrete follow-up work; otherwise stop it. Completion and `wait` leave the child alive. `stop` closes the identified child pane and deletes its control metadata and pending messages after confirmed closure. Conversation history remains in Pi's native sessions directory for analysis and resume. Older run-local sessions are archived there before cleanup; archival failure preserves the run directory for retry. Other panes in the tab are preserved.
 
 Use `/subagent` to select a child and focus its existing tab; select the parent's tab to return. Selection follows a child moved to another tab. In Rex, tab switching requires Remote Control enabled in Rex.app under Settings → Rex Server; a rejected client action is reported in the parent.
 
@@ -80,6 +80,7 @@ Read the CLI error and current status before choosing the next action. A nonzero
 | Spawn failed or timed out | Inspect `subagent list` and existing tabs in the selected backend before retrying; creation may already have succeeded. |
 | `unavailable` or terminal identity/reuse error | Preserve run data. Restore the connection or verify ownership before management; uncertainty is not proof of exit. |
 | Task error or cancellation | Report the failure; keep the child only for concrete recovery work, otherwise retain the needed result and stop it. |
+| Session archival failed | Keep the run directory. Resolve the reported storage, conflict, or invalid-header error, then retry `stop`. |
 | Lifecycle operation already in progress | Let its owner finish, then retry. Confirmed dead-owner tickets are reclaimed automatically; invalid owner records require inspection. |
 
 For setup, compatibility, and storage details, read [README.md](../../README.md).

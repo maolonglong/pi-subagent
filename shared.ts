@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -117,6 +117,42 @@ export function getAgentDir(): string {
 	return resolve(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"));
 }
 export function getRunsDir(): string { return join(getAgentDir(), "subagents"); }
+
+function sessionPath(cwd: string, timestamp: string, id: string): string {
+	const directory = `--${resolve(cwd).replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	return join(getAgentDir(), "sessions", directory, `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
+}
+
+/** Use Pi's documented session format without requiring its SDK in the standalone CLI. */
+export function createSessionFile(cwd: string): string {
+	const header = { type: "session", version: 3, id: randomUUID(), timestamp: new Date().toISOString(), cwd: realpathSync(cwd) };
+	const path = sessionPath(header.cwd, header.timestamp, header.id);
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	writeFileSync(path, `${JSON.stringify(header)}\n`, { flag: "wx", mode: 0o600 });
+	return path;
+}
+
+function archiveRunSessions(runDir: string): void {
+	for (const entry of readdirSync(runDir, { recursive: true, withFileTypes: true })) {
+		if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+		const source = join(entry.parentPath, entry.name);
+		const bytes = readFileSync(source);
+		if (!bytes.length) continue;
+		const newline = bytes.indexOf(10);
+		const header = JSON.parse(bytes.subarray(0, newline < 0 ? bytes.length : newline).toString("utf8"));
+		if (header?.type !== "session" || typeof header.id !== "string" || !/^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$/.test(header.id) ||
+			typeof header.cwd !== "string" || !isAbsolute(header.cwd) || typeof header.timestamp !== "string" || !Number.isFinite(Date.parse(header.timestamp))) {
+			throw new Error(`Invalid session header in ${source}`);
+		}
+		const target = sessionPath(header.cwd, new Date(header.timestamp).toISOString(), header.id);
+		mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
+		try { copyFileSync(source, target, constants.COPYFILE_EXCL); }
+		catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST" || !readFileSync(target).equals(bytes)) throw error;
+		}
+		chmodSync(target, 0o600);
+	}
+}
 export function metadataPath(runDir: string): string { return join(runDir, "metadata.json"); }
 export function inboxDir(runDir: string): string { return join(runDir, "inbox"); }
 
@@ -206,8 +242,13 @@ export function updateRunState(runDir: string, patch: Partial<RunStatus>): void 
 export function writeTerminal(runDir: string, terminal: TerminalRecord): boolean {
 	return !!readConfig(runDir) && writeJson(join(runDir, "terminal.json"), terminal);
 }
-export function removeRunDir(runDir: string): void {
-	rmSync(runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+export async function removeRun(run: RunMetadata): Promise<void> {
+	await withRunLifecycle(run.runDir, async (current) => {
+		await stopRunUnlocked(current, false);
+		try { archiveRunSessions(current.runDir); }
+		catch (error) { throw new Error(`Could not archive sessions for ${current.handle}; run data was preserved: ${error}`); }
+		rmSync(current.runDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	});
 }
 
 export function requireHerdr(): void {

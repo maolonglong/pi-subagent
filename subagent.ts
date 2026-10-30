@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "n
 import { join, resolve } from "node:path";
 import {
 	assistantText,
+	createSessionFile,
 	effectiveRunState,
 	getRunsDir,
 	inboxDir,
@@ -12,7 +13,7 @@ import {
 	listRuns,
 	readLatestAssistant,
 	readMetadata,
-	removeRunDir,
+	removeRun,
 	runDisplayName,
 	isValidRunName,
 	type InboxMessage,
@@ -22,7 +23,6 @@ import {
 	renameRunTab,
 	requireBackend,
 	runIsRunning,
-	stopRun,
 	updateMetadata,
 	writeMetadata,
 } from "./shared.ts";
@@ -161,9 +161,8 @@ async function spawnSubagent(args: string[]): Promise<void> {
 	if (backend === "herdr") findHerdrIntegration();
 	const handle = generateHandle();
 	const runDir = runDirForHandle(handle);
-	const sessionFile = join(runDir, "session.jsonl");
 	mkdirSync(inboxDir(runDir), { recursive: true, mode: 0o700 });
-	writeFileSync(sessionFile, "", { mode: 0o600 });
+	const sessionFile = createSessionFile(cwd);
 
 	const launchArgs: string[] = [];
 	if (tools) launchArgs.push("--tools", tools);
@@ -284,8 +283,7 @@ async function waitSubagent(args: string[]): Promise<void> {
 async function stopSubagent(args: string[]): Promise<void> {
 	if (args.length !== 1) usage();
 	const metadata = getRun(args[0]);
-	await stopRun(metadata);
-	removeRunDir(metadata.runDir);
+	await removeRun(metadata);
 	process.stdout.write(`Stopped ${runDisplayName(metadata)}\n`);
 }
 

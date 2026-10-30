@@ -82,6 +82,11 @@ test("real Rex/Pi: launch, focus, messages, rename, suspension, recovery and saf
  const transcript = readFileSync(current().sessionFile, "utf8");
  assert.match(transcript, /steering sentinel/); assert.match(transcript, /follow-up sentinel/);
  check("steering and queued follow-up reached durable transcript");
+ assert.ok(current().sessionFile.startsWith(join(dir, "sessions") + "/"));
+ const listingFrom = events().length;
+ await input(current().terminal!.terminalId!, "/fixture-list-sessions");
+ await until(() => events().slice(listingFrom).some((event) => event.event === "session_listing" && event.paths.includes(current().sessionFile)), "native Pi session list did not discover the child");
+ check("native Pi session discovery includes the managed child");
  const programState = async () => {
   const result = await rex<{ records: { state: string; app?: string }[] }>(["block", "call", "-s", session, "-b", current().terminal!.terminalId!, "program_status"]);
   writeFileSync(join(dir, "program-status.json"), JSON.stringify(result, null, 2));
@@ -151,7 +156,9 @@ test("real Rex/Pi: launch, focus, messages, rename, suspension, recovery and saf
  await cli(["send", run.handle, "recovered sentinel"]);
  assert.match((await cli(["wait", run.handle, "--timeout", "10"])).stdout, /recovered sentinel/);
  check("error outcome is reported and a subsequent task can recover");
+ const savedTranscript = readFileSync(run.sessionFile, "utf8");
  await cli(["stop", run.handle]);
  assert.equal(existsSync(run.runDir), false);
- check("confirmed stop removes only the managed run");
+ assert.ok(readFileSync(run.sessionFile, "utf8").startsWith(savedTranscript));
+ check("confirmed stop removes control data and preserves the native session");
 });

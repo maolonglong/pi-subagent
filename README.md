@@ -93,17 +93,21 @@ Nested subagents are disabled. Child sessions do not receive the subagent skill.
 
 Suspending interrupts current generation. Only durable history is preserved; in-flight generation and messages already accepted into Pi's in-memory queues are not guaranteed to survive.
 
-`subagent stop` permanently removes a run and its transcript after confirming closure. It closes only the identified child pane, preserving any other panes added to its tab. It refuses to close another Pi session or an unrelated foreground process reusing the terminal.
+`subagent stop` closes a run and removes its control data after confirming closure. Its Pi session files remain available for analysis and ordinary Pi resume. It closes only the identified child pane, preserving any other panes added to its tab. It refuses to close another Pi session or an unrelated foreground process reusing the terminal.
 
 ## Storage and failures
 
-Run data is stored under the Pi agent directory's `subagents/` folder:
+Conversation history uses Pi's native layout: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<session-id>.jsonl`. When `PI_CODING_AGENT_DIR` is set, `sessions/` is under that agent directory. Files are written there from creation and retained after `stop`, including histories from interrupted tasks. They appear in the normal Pi session list; `pi --continue` can select a recent subagent session. Delete history through Pi's normal session management when it is no longer needed.
 
-- `metadata.json`: CLI-owned configuration, name, and parent-session association.
+Control data is stored under the Pi agent directory's `subagents/` folder:
+
+- `metadata.json`: CLI-owned configuration, name, session-file path, and parent-session association.
 - `terminal.json`: parent-owned backend endpoint, terminal identity, launch phase, and suspension marker. Rex records also retain the session and server instance.
 - `state.json`: child-owned PID, session path, status, and outcome.
 - `lifecycle-*.lock`: PID-tagged tickets that serialize parent/CLI lifecycle operations.
-- `session.jsonl` and `inbox/`: Pi history and message delivery.
+- `inbox/` and `initial-*.txt`: pending message delivery and initial prompt attachments.
+
+For older runs with JSONL files inside their control directory, `stop` archives those files to the native sessions directory after closing the terminal and before deleting control data. Archival preserves session IDs and file contents. An identical existing archive is reused; a conflicting archive, invalid session header, or storage failure preserves the run directory and reports an error. Retrying after resolving the error is safe. There is no bulk migration, and already deleted history cannot be recovered.
 
 Separate writers prevent a stale child status write from overwriting a rename, terminal identity, or suspension marker. Lifecycle operations use ordered, per-controller tickets and reread metadata after acquiring ownership, so concurrent restores cannot create duplicate children. Suspension intent is saved before closing a live child; if the close response is lost, resume verifies the original terminal is absent before creating another one. Updates use atomic file replacement. Initial multiline task text is stored in a private file and passed through Pi's native `@file` processing; fixed Herdr launcher arguments are shell-quoted, and Rex launches with an argument array. Herdr startup uses `pane run` and verifies the matching Pi session; Rex verifies the child's published session and foreground PID. Neither startup waits for task completion.
 

@@ -2,7 +2,7 @@
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
 import { createAssistantMessageEventStream, type TextContent, type ToolCall } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 export default function (pi: ExtensionAPI) {
@@ -15,6 +15,10 @@ export default function (pi: ExtensionAPI) {
  pi.on("agent_settled", logEvent);
  pi.on("ui_prompt_start", logEvent);
  pi.on("ui_prompt_end", logEvent);
+ pi.registerCommand("fixture-list-sessions", {
+  description: "Test-only native session discovery",
+  async handler(_args, ctx) { log("session_listing", { paths: (await SessionManager.list(ctx.cwd)).map((session) => session.path) }); },
+ });
  pi.registerCommand("fixture-dialog", {
   description: "Test-only expiring dialog",
   async handler(kind, ctx) {

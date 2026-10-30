@@ -18,7 +18,7 @@ for (const mode of ["unknown", "unreadable", "closed-during-query"]) {
    writeMetadata({ version: 2, backend: "rex", handle, runDir, sessionFile, cwd: dir, provider: "fixture", model: "fixture", thinking: "off", createdAt: now, updatedAt: now });
    updateRunState(runDir, { state: "idle", hasStarted: true, childSessionId: handle, pid: handle === "abcdef" ? 123 : 456, outcome: "completed" });
    writeTerminal(runDir, { socketPath: "unix:///fixture#instance", rexSession: "session:test", phase: "ready", terminalId: `block:${handle}` });
-   writeFileSync(sessionFile, JSON.stringify({ type: "message", id: "answer", parentId: null, message: { role: "assistant", content: [{ type: "text", text: "fixture done" }], stopReason: "stop" } }) + "\n");
+   writeFileSync(sessionFile, JSON.stringify({ type: "session", version: 3, id: handle, timestamp: now, cwd: dir }) + "\n" + JSON.stringify({ type: "message", id: "answer", parentId: null, message: { role: "assistant", content: [{ type: "text", text: "fixture done" }], stopReason: "stop" } }) + "\n");
   }
   writeFileSync(join(bin, "rex"), `#!${process.execPath}
 import {appendFileSync,existsSync,writeFileSync} from 'node:fs';
