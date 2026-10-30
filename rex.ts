@@ -32,9 +32,14 @@ export async function listRexPanes(): Promise<TerminalPane[] & { rexEndpoint: st
 	const current = await context();
 	const { blocks } = await rex<{ blocks: { block_id: string; window_id: string; creator_name: string }[] }>(["block", "ls", "-s", current.session, "--json"]);
 	const panes = await Promise.all(blocks.filter((block) => block.creator_name === "com.superlogical.terminal").map(async (block): Promise<TerminalPane> => {
-		const info = await rex<{ child?: { pid: number }; foreground?: { pid: number }; last_exit?: { exit_code: number } | null }>(["block", "call", "-s", current.session, "-b", block.block_id, "process"]);
-		if (!info.child && !info.last_exit) throw new Error("Rex process state is uncertain; run data was preserved");
-		return { pane_id: block.block_id, terminal_id: block.block_id, tab_id: block.window_id, rexPid: info.foreground?.pid, rexAlive: !!info.child };
+		const pane = { pane_id: block.block_id, terminal_id: block.block_id, tab_id: block.window_id };
+		try {
+			const info = await rex<{ child?: { pid: number }; foreground?: { pid: number }; last_exit?: { exit_code: number } | null }>(["block", "call", "-s", current.session, "-b", block.block_id, "process"]);
+			if (!info.child && !info.last_exit) throw new Error("Rex process state is uncertain");
+			return { ...pane, rexPid: info.foreground?.pid, rexAlive: !!info.child };
+		} catch (error) {
+			return { ...pane, rexError: error instanceof Error ? error.message : String(error) };
+		}
 	}));
 	return Object.assign(panes, { rexEndpoint: current.endpoint });
 }

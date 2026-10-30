@@ -74,6 +74,7 @@ export interface InboxMessage {
 export interface TerminalPane {
 	rexPid?: number;
 	rexAlive?: boolean;
+	rexError?: string;
 	pane_id: string;
 	tab_id: string;
 	terminal_id: string;
@@ -256,7 +257,9 @@ export function resolveRunPane(run: RunMetadata, panes: PaneSnapshot): TerminalP
 		if (run.terminal.phase === "closed") return undefined;
 		throw new Error(`Terminal identity is uncertain for ${run.handle}; inspect ${run.backend} before retrying; run data was preserved`);
 	}
-	return panes.find((pane) => pane.terminal_id === run.terminal!.terminalId);
+	const pane = panes.find((pane) => pane.terminal_id === run.terminal!.terminalId);
+	if (pane?.rexError) throw new Error(`Cannot inspect Rex terminal: ${pane.rexError}; run data was preserved`);
+	return pane;
 }
 export function effectiveRunState(run: RunMetadata, panes: PaneSnapshot | undefined): RunState | "unavailable" {
 	if (!panes) return "unavailable";
@@ -289,7 +292,7 @@ export async function focusRun(run: RunMetadata): Promise<void> {
 	if (run.backend === "rex") return focusRexRun(run);
 	const pane = resolveRunPane(run, await listPanes("herdr"));
 	if (!pane || !ownsAgent(run, pane)) throw new Error("The subagent session is no longer in its terminal");
-	await herdr(["tab", "focus", pane.tab_id]);
+	await herdr(["agent", "focus", pane.pane_id]);
 }
 export async function renameRunTab(run: RunMetadata): Promise<void> {
 	if (run.backend === "rex") return renameRexRun(run);

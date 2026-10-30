@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test, type TestContext } from "node:test";
 import { promisify } from "node:util";
-import { delay, herdr, readMetadata, type RunMetadata } from "../shared.ts";
+import { delay, focusRun, herdr, readMetadata, type RunMetadata } from "../shared.ts";
 
 const root = resolve(import.meta.dirname, "..");
 const exec = promisify(execFile);
@@ -194,7 +194,13 @@ test("real Herdr terminal ownership survives moves, splits and reuse", { skip: !
  const first = await h.spawn("split child", "hello");
  await h.cli(["wait", first, "--timeout", "10"]);
  const firstPane = await h.pane(h.run(first));
- const extra = (await h.api(["pane", "split", firstPane.pane_id, "--direction", "right", "--cwd", root, "--no-focus"])).pane;
+ const extra = (await h.api(["pane", "split", firstPane.pane_id, "--direction", "right", "--cwd", root, "--focus"])).pane;
+ assert.equal((await h.api(["pane", "list"])).panes.find((pane) => pane.focused).pane_id, extra.pane_id);
+ await h.api(["tab", "focus", h.original]);
+ await focusRun(h.run(first));
+ assert.equal((await h.api(["pane", "list"])).panes.find((pane) => pane.focused).pane_id, firstPane.pane_id);
+ h.check("switching to a split tab focuses the child pane rather than the previous pane");
+ await h.api(["tab", "focus", h.original]);
  await h.cli(["stop", first]);
  assert.equal((await h.api(["pane", "get", extra.pane_id])).pane.tab_id, firstPane.tab_id);
  h.check("stop preserves a second pane added to a child tab");
