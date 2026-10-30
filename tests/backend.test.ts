@@ -8,7 +8,7 @@ import * as shared from "../shared.ts";
 
 const root = resolve(import.meta.dirname, "..");
 
-test("spawn requires a managed Herdr pane before creating a terminal or run", (t) => {
+test("spawn requires a managed Herdr or Rex terminal before creating a run", (t) => {
  const dir = mkdtempSync(join(tmpdir(), "pi-subagent-boundary-"));
  const bin = join(dir, "bin");
  mkdirSync(bin);
@@ -20,7 +20,7 @@ console.error("unexpected Herdr invocation");
 process.exit(99);
 `, { mode: 0o700 });
  const result = spawnSync(process.execPath, [join(root, "subagent.ts"), "spawn", "--prompt", "fixture"], {
-  env: { ...process.env, HERDR_ENV: "", PI_SUBAGENT_RUN_DIR: "", PI_CODING_AGENT_DIR: dir, PI_PROVIDER: "fixture", PI_MODEL: "fixture", PATH: `${bin}:${process.env.PATH}` },
+  env: { ...process.env, HERDR_ENV: "", REX_SESSION: "", REX_BLOCK: "", PI_SUBAGENT_RUN_DIR: "", PI_CODING_AGENT_DIR: dir, PI_PROVIDER: "fixture", PI_MODEL: "fixture", PATH: `${bin}:${process.env.PATH}` },
   encoding: "utf8", timeout: 10000,
  });
  writeFileSync(join(dir, "result.json"), JSON.stringify({ status: result.status, stdout: result.stdout, stderr: result.stderr }, null, 2));

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import {
-	effectiveRunState, focusRun, inboxDir, listPanes, listRuns, readLatestAssistant, readMetadata,
+	detectBackend, effectiveRunState, focusRun, inboxDir, listPanes, listRuns, readLatestAssistant, readMetadata,
 	resumeRun, runDisplayName, stopRun, updateRunState, type InboxMessage,
 } from "./shared.ts";
 
@@ -34,7 +34,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("subagent", {
-		description: "Switch to a subagent's Herdr tab",
+		description: "Switch to a subagent's tab",
 		handler: async (_args, ctx) => {
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify("/subagent requires interactive mode", "error");
@@ -99,7 +99,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 		};
 
 		pi.on("session_start", async (_event, ctx) => {
-			if (process.env.HERDR_ENV !== "1") return;
+			if (!detectBackend()) return;
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
 				if (!run.terminal?.suspended) continue;
 				try {
@@ -119,7 +119,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 			widgetTimer = undefined;
 			widgetContext = undefined;
 			ctx.ui.setWidget("subagents", undefined);
-			if (event.reason === "reload" || process.env.HERDR_ENV !== "1") return;
+			if (event.reason === "reload" || !detectBackend()) return;
 			for (const run of listRuns(ctx.sessionManager.getSessionId())) {
 				try { await stopRun(run, true); }
 				catch (error) { if (ctx.hasUI) ctx.ui.notify(`Could not suspend ${runDisplayName(run)}: ${error}`, "error"); }

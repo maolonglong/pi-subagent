@@ -5,12 +5,27 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { listRexPanes, launchRexRun, stopRexRun, focusRexRun, renameRexRun } from "./rex.ts";
+
+export type Backend = "herdr" | "rex";
+
+export function detectBackend(env: NodeJS.ProcessEnv = process.env): Backend | undefined {
+	if (env.HERDR_ENV === "1" && env.HERDR_SOCKET_PATH && env.HERDR_WORKSPACE_ID && env.HERDR_PANE_ID) return "herdr";
+	if (env.REX_SESSION && env.REX_BLOCK) return "rex";
+	return undefined;
+}
+
+export function requireBackend(): Backend {
+	const backend = detectBackend();
+	if (!backend) throw new Error("Run this command inside a Herdr-managed pane or Rex terminal");
+	return backend;
+}
 
 export type RunState = "starting" | "busy" | "blocked" | "idle" | "exited" | "error";
 
 export interface RunConfig {
 	version: 2;
-	backend: "herdr";
+	backend: Backend;
 	handle: string;
 	name?: string;
 	parentSessionId?: string;
@@ -38,6 +53,7 @@ export interface RunStatus {
 
 export interface TerminalRecord {
 	socketPath: string;
+	rexSession?: string;
 	phase: "creating" | "ready" | "closed" | "uncertain";
 	terminalId?: string;
 	paneId?: string;
@@ -55,7 +71,9 @@ export interface InboxMessage {
 	delivery: "auto" | "followUp";
 }
 
-export interface HerdrPane {
+export interface TerminalPane {
+	rexPid?: number;
+	rexAlive?: boolean;
 	pane_id: string;
 	tab_id: string;
 	terminal_id: string;
@@ -63,6 +81,8 @@ export interface HerdrPane {
 	agent_status?: string;
 	agent_session?: { kind: string; value: string };
 }
+
+export type PaneSnapshot = TerminalPane[] & { rexEndpoint?: string };
 
 interface ProcessInfo {
 	shell_pid: number;
@@ -129,7 +149,7 @@ export function runTabName(run: RunConfig): string { return `subagent ${runDispl
 
 function readConfig(runDir: string): RunConfig | undefined {
 	const value = readJson(metadataPath(runDir));
-	if (!value || value.version !== 2 || value.backend !== "herdr" ||
+	if (!value || value.version !== 2 || (value.backend !== "herdr" && value.backend !== "rex") ||
 		typeof value.handle !== "string" || !/^[a-f0-9]{6}$/.test(value.handle) ||
 		(value.name !== undefined && !isValidRunName(value.name)) ||
 		typeof value.runDir !== "string" || resolve(value.runDir) !== resolve(runDir) ||
@@ -155,6 +175,7 @@ export function readMetadata(runDir: string): RunMetadata | undefined {
 		outcome: status?.outcome === "completed" || status?.outcome === "aborted" || status?.outcome === "error" ? status.outcome : undefined,
 		error: typeof status?.error === "string" ? status.error : undefined,
 		terminal: terminal && typeof terminal.socketPath === "string" && ["creating", "ready", "closed", "uncertain"].includes(terminal.phase as string) &&
+			(terminal.rexSession === undefined || typeof terminal.rexSession === "string") &&
 			(terminal.terminalId === undefined || typeof terminal.terminalId === "string") && (terminal.paneId === undefined || typeof terminal.paneId === "string")
 			? terminal as unknown as TerminalRecord : undefined,
 	};
@@ -214,37 +235,48 @@ export async function herdr<T = unknown>(args: string[]): Promise<T> {
 		throw new Error(failure.stderr?.trim() || failure.message);
 	}
 }
-export async function listPanes(): Promise<HerdrPane[]> {
-	return (await herdr<{ panes: HerdrPane[] }>(["pane", "list"])).panes;
+export async function listPanes(backend: Backend = requireBackend()): Promise<PaneSnapshot> {
+	if (backend === "rex") return listRexPanes();
+	return (await herdr<{ panes: TerminalPane[] }>(["pane", "list"])).panes;
 }
 
 function canonical(path: string): string {
 	try { return realpathSync(path); } catch { return resolve(path); }
 }
-function ownsAgent(run: RunMetadata, pane: HerdrPane): boolean {
+function ownsAgent(run: RunMetadata, pane: TerminalPane): boolean {
+	if (run.backend === "rex") return !!run.pid && !!run.childSessionId && pane.rexPid === run.pid;
 	return pane.agent === "pi" && pane.agent_session?.kind === "path" && canonical(pane.agent_session.value) === canonical(run.sessionFile);
 }
-export function resolveRunPane(run: RunMetadata, panes: HerdrPane[]): HerdrPane | undefined {
-	if (!run.terminal || run.terminal.socketPath !== process.env.HERDR_SOCKET_PATH) throw new Error("Herdr endpoint is unavailable or different; run data was preserved");
+export function resolveRunPane(run: RunMetadata, panes: PaneSnapshot): TerminalPane | undefined {
+	if (run.backend === "rex") {
+		if (!run.terminal?.rexSession || run.terminal.rexSession !== process.env.REX_SESSION || detectBackend() !== "rex" ||
+			panes.rexEndpoint !== run.terminal.socketPath) throw new Error("Rex endpoint is unavailable or different; run data was preserved");
+	} else if (!run.terminal || run.terminal.socketPath !== process.env.HERDR_SOCKET_PATH || panes.rexEndpoint) throw new Error("Herdr endpoint is unavailable or different; run data was preserved");
 	if (!run.terminal.terminalId) {
 		if (run.terminal.phase === "closed") return undefined;
-		throw new Error(`Terminal identity is uncertain for ${run.handle}; inspect Herdr before retrying; run data was preserved`);
+		throw new Error(`Terminal identity is uncertain for ${run.handle}; inspect ${run.backend} before retrying; run data was preserved`);
 	}
 	return panes.find((pane) => pane.terminal_id === run.terminal!.terminalId);
 }
-export function effectiveRunState(run: RunMetadata, panes: HerdrPane[] | undefined): RunState | "unavailable" {
+export function effectiveRunState(run: RunMetadata, panes: PaneSnapshot | undefined): RunState | "unavailable" {
 	if (!panes) return "unavailable";
 	try {
 		const pane = resolveRunPane(run, panes);
 		if (!pane) return "exited";
+		if (run.backend === "rex" && !ownsAgent(run, pane)) return pane.rexAlive ? "unavailable" : "exited";
 		if (!ownsAgent(run, pane)) return pane.agent || run.terminal?.phase !== "ready" ? "unavailable" : "exited";
 		if (run.state === "idle" && run.outcome === "error") return "error";
 		return run.state;
 	} catch { return "unavailable"; }
 }
 export async function runIsRunning(run: RunMetadata): Promise<boolean> {
-	const pane = resolveRunPane(run, await listPanes());
+	const pane = resolveRunPane(run, await listPanes(run.backend));
 	if (!pane) return false;
+	if (run.backend === "rex") {
+		if (ownsAgent(run, pane)) return true;
+		if (pane.rexAlive) throw new Error("Rex terminal ownership cannot be confirmed; run data was preserved");
+		return false;
+	}
 	if (!ownsAgent(run, pane)) {
 		if (pane.agent) throw new Error("Terminal belongs to another session; run data was preserved");
 		return false;
@@ -254,12 +286,14 @@ export async function runIsRunning(run: RunMetadata): Promise<boolean> {
 	return true;
 }
 export async function focusRun(run: RunMetadata): Promise<void> {
-	const pane = resolveRunPane(run, await listPanes());
+	if (run.backend === "rex") return focusRexRun(run);
+	const pane = resolveRunPane(run, await listPanes("herdr"));
 	if (!pane || !ownsAgent(run, pane)) throw new Error("The subagent session is no longer in its terminal");
 	await herdr(["tab", "focus", pane.tab_id]);
 }
 export async function renameRunTab(run: RunMetadata): Promise<void> {
-	const pane = resolveRunPane(run, await listPanes());
+	if (run.backend === "rex") return renameRexRun(run);
+	const pane = resolveRunPane(run, await listPanes("herdr"));
 	if (pane) {
 		if (!ownsAgent(run, pane)) throw new Error("Terminal belongs to another session; rename was not applied");
 		await herdr(["tab", "rename", pane.tab_id, runTabName(run)]);
@@ -318,7 +352,8 @@ export async function stopRun(run: RunMetadata, suspend = false): Promise<void> 
 
 /** Close only an identified child or its idle shell; never close the whole tab. */
 async function stopRunUnlocked(run: RunMetadata, suspend: boolean): Promise<void> {
-	const pane = resolveRunPane(run, await listPanes());
+	if (run.backend === "rex") return stopRexRun(run, suspend);
+	const pane = resolveRunPane(run, await listPanes("herdr"));
 	let running = false;
 	if (pane) {
 		if (pane.agent && !ownsAgent(run, pane)) throw new Error("Refusing to close another agent session; run data was preserved");
@@ -331,7 +366,7 @@ async function stopRunUnlocked(run: RunMetadata, suspend: boolean): Promise<void
 		if (suspend && running && !writeTerminal(run.runDir, { ...run.terminal!, suspended: true })) throw new Error("Run was removed before suspension");
 		await herdr(["pane", "close", pane.pane_id]);
 		const deadline = Date.now() + 3000;
-		while ((await listPanes()).some((candidate) => candidate.terminal_id === pane.terminal_id)) {
+		while ((await listPanes("herdr")).some((candidate) => candidate.terminal_id === pane.terminal_id)) {
 			if (Date.now() >= deadline) throw new Error("Terminal close was not confirmed; run data was preserved");
 			await delay(100);
 		}
@@ -353,10 +388,11 @@ export async function launchRun(run: RunMetadata, initialArgs: string[] = []): P
 
 /** Initial task text is a file argument so multiline prompts never enter shell command text. */
 async function launchRunUnlocked(run: RunMetadata, initialArgs: string[]): Promise<void> {
+	if (run.backend === "rex") return launchRexRun(run, initialArgs);
 	requireHerdr();
 	const integration = findHerdrIntegration();
 	if (run.terminal) {
-		const pane = resolveRunPane(run, await listPanes());
+		const pane = resolveRunPane(run, await listPanes("herdr"));
 		if (pane) throw new Error("A terminal already exists for this run; inspect it before retrying");
 		if (run.terminal.phase !== "closed" && !run.terminal.suspended) throw new Error("Previous launch is uncertain; run data was preserved");
 	}
@@ -371,7 +407,7 @@ async function launchRunUnlocked(run: RunMetadata, initialArgs: string[]): Promi
 	if (!writeTerminal(run.runDir, terminal)) throw new Error("Run was removed before launch");
 	updateRunState(run.runDir, { state: "starting", pid: undefined, childSessionId: undefined, outcome: undefined, error: undefined });
 	try {
-		const created = await herdr<{ root_pane: HerdrPane }>([
+		const created = await herdr<{ root_pane: TerminalPane }>([
 			"tab", "create", "--workspace", process.env.HERDR_WORKSPACE_ID!, "--cwd", run.cwd, "--label", runTabName(run), "--no-focus",
 			"--env", `PI_SUBAGENT_RUN_DIR=${run.runDir}`, "--env", `PI_CODING_AGENT_DIR=${getAgentDir()}`, "--env", `PATH=${process.env.PATH ?? ""}`,
 		]);
@@ -386,7 +422,7 @@ async function launchRunUnlocked(run: RunMetadata, initialArgs: string[]): Promi
 		while (Date.now() < deadline) {
 			const current = readMetadata(run.runDir);
 			if (!current) throw new Error("Run was removed during launch");
-			const pane = resolveRunPane(current, await listPanes());
+			const pane = resolveRunPane(current, await listPanes("herdr"));
 			if (!pane) throw new Error("Child terminal closed during launch");
 			if (current.pid && current.childSessionId && ownsAgent(current, pane)) {
 				await herdr(["agent", "rename", pane.pane_id, `pi-subagent-${run.handle}`]);

@@ -20,7 +20,7 @@ import {
 	findHerdrIntegration,
 	listPanes,
 	renameRunTab,
-	requireHerdr,
+	requireBackend,
 	runIsRunning,
 	stopRun,
 	updateMetadata,
@@ -28,7 +28,7 @@ import {
 } from "./shared.ts";
 
 const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-const viewHint = "View: select its Herdr tab or use /subagent";
+const viewHint = "View: select its tab or use /subagent";
 
 function fail(message: string): never {
 	throw new Error(message);
@@ -81,7 +81,7 @@ function generateHandle(): string {
 
 async function spawnSubagent(args: string[]): Promise<void> {
 	if (process.env.PI_SUBAGENT_RUN_DIR) fail("Nested subagents are disabled");
-	requireHerdr();
+	const backend = requireBackend();
 	let name: string | undefined;
 	let provider = process.env.PI_PROVIDER;
 	let model = process.env.PI_MODEL;
@@ -158,7 +158,7 @@ async function spawnSubagent(args: string[]): Promise<void> {
 	if (prompts.length === 0 && files.length === 0) fail("spawn requires at least one --prompt or --file");
 	if (!existsSync(cwd)) fail(`Working directory not found: ${cwd}`);
 
-	findHerdrIntegration();
+	if (backend === "herdr") findHerdrIntegration();
 	const handle = generateHandle();
 	const runDir = runDirForHandle(handle);
 	const sessionFile = join(runDir, "session.jsonl");
@@ -175,7 +175,7 @@ async function spawnSubagent(args: string[]): Promise<void> {
 	const now = new Date().toISOString();
 	const metadata: RunConfig = {
 		version: 2,
-		backend: "herdr",
+		backend,
 		handle,
 		name,
 		parentSessionId: process.env.PI_SESSION_ID || undefined,
@@ -266,7 +266,7 @@ async function waitSubagent(args: string[]): Promise<void> {
 			? readdirSync(inboxDir(metadata.runDir)).some((file) => file.endsWith(".json"))
 			: false;
 		const state = effectiveRunState(metadata, await listPanes().catch(() => undefined));
-		if (state === "unavailable") fail(`Cannot reach or identify the Herdr session for ${handle}; run data was preserved`);
+		if (state === "unavailable") fail(`Cannot reach or identify the backend session for ${handle}; run data was preserved`);
 		if (state === "error" && !pending) fail(metadata.error || `${handle} failed`);
 		if (state === "exited") fail(`${handle} exited before finishing`);
 		if (metadata.hasStarted && state === "idle" && !pending) {
