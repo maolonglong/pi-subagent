@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DynamicBorder, type ExtensionAPI, type ExtensionContext, keyHint } from "@earendil-works/pi-coding-agent";
+import { DynamicBorder, type ExtensionAPI, type ExtensionContext, rawKeyHint } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import {
 	detectBackend, effectiveRunState, focusRun, inboxDir, listPanes, listRuns, readLatestAssistant, readMetadata,
@@ -50,7 +50,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				value: run.handle,
 				label: `${runDisplayName(run)}  ${effectiveRunState(run, panes)}  ${run.provider}/${run.model}  ${run.thinking}`,
 			}));
-			const selected = await ctx.ui.custom<string | undefined>((customTui, theme, _keybindings, done) => {
+			const selected = await ctx.ui.custom<string | undefined>((customTui, theme, keybindings, done) => {
 				const list = new SelectList(items, Math.min(items.length, 10), {
 					selectedPrefix: (text) => theme.fg("accent", text), selectedText: (text) => theme.fg("accent", text),
 					description: (text) => theme.fg("muted", text), scrollInfo: (text) => theme.fg("dim", text), noMatch: (text) => theme.fg("warning", text),
@@ -61,7 +61,7 @@ export default function subagentExtension(pi: ExtensionAPI) {
 				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 				container.addChild(new Text(theme.fg("accent", theme.bold("Switch to subagent")), 1, 0));
 				container.addChild(list);
-				container.addChild(new Text(theme.fg("dim", `${keyHint("tui.select.confirm", "select")}  ${keyHint("tui.select.cancel", "cancel")}`), 1, 0));
+				container.addChild(new Text(theme.fg("dim", `${rawKeyHint(keybindings.getKeys("tui.select.confirm").join("/"), "select")}  ${rawKeyHint(keybindings.getKeys("tui.select.cancel").join("/"), "cancel")}`), 1, 0));
 				container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 				return {
 					render: (width) => container.render(width), invalidate: () => container.invalidate(),
